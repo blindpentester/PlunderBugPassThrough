@@ -1,66 +1,53 @@
 #!/bin/bash
 
-# Define interface names
-BRIDGE="br0"  # Bridged Interface
-INTERFACE1="enp6s0" # Attacker PC's Internet Interface
-INTERFACE2="enx001337a72c94" # PlunderBug Interface
-BRIDGE_IP="192.168.102.100/24" # VLan to get it onto
+# Variables
+PLUNDERBUG_INTERFACE="br0"  # Update with the actual PlunderBug interface
+MONITOR_INTERFACE="br0"     # Update with the actual interface providing internet to the victim
+CAPTURE_FILE="/home/username/Documents/plunderbug_capture.pcap"
 
-# Function to enable the bridge
-enable_bridge() {
-    echo "Enabling network bridge $BRIDGE..."
-    
-    # Check if bridge already exists
-    if ip link show $BRIDGE &>/dev/null; then
-        echo "$BRIDGE already exists, skipping creation..."
-    else
-        # Create the bridge
-        sudo ip link add name $BRIDGE type bridge
-        echo "$BRIDGE created."
-    fi
-    
-    # Add interfaces to the bridge
-    sudo ip link set $INTERFACE1 master $BRIDGE
-    sudo ip link set $INTERFACE2 master $BRIDGE
-    
-    # Bring up the interfaces and the bridge
-    sudo ip link set $INTERFACE1 up
-    sudo ip link set $INTERFACE2 up
-    sudo ip link set $BRIDGE up
-    
-    # Assign IP address to the bridge
-    sudo ip addr add $BRIDGE_IP dev $BRIDGE
-    
-    # Optionally request a DHCP IP address
-    sudo dhclient $BRIDGE
-    
-    echo "Bridge $BRIDGE enabled with IP $BRIDGE_IP."
+# Function to enable sharing and start monitoring
+enable_monitoring() {
+    echo "Enabling internet sharing and starting PlunderBug monitoring..."
+
+    # Enable IP forwarding on attacker machine
+    sudo sysctl -w net.ipv4.ip_forward=1
+
+    # Set up NAT to share internet from MONITOR_INTERFACE to PLUNDERBUG_INTERFACE
+    sudo iptables -t nat -A POSTROUTING -o $MONITOR_INTERFACE -j MASQUERADE
+    sudo iptables -A FORWARD -i $PLUNDERBUG_INTERFACE -o $MONITOR_INTERFACE -j ACCEPT
+    sudo iptables -A FORWARD -i $MONITOR_INTERFACE -o $PLUNDERBUG_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    # Start capturing traffic on PlunderBug
+    echo "Starting tcpdump on $PLUNDERBUG_INTERFACE..."
+    sudo tcpdump -i $PLUNDERBUG_INTERFACE -w $CAPTURE_FILE &
+    TCPDUMP_PID=$!
+    echo "tcpdump running with PID $TCPDUMP_PID"
 }
 
-# Function to disable the bridge
-disable_bridge() {
-    echo "Disabling network bridge $BRIDGE..."
-    
-    # Check if bridge exists
-    if ip link show $BRIDGE &>/dev/null; then
-        # Bring down the bridge and interfaces
-        sudo ip link set $BRIDGE down
-        sudo ip link set $INTERFACE1 down
-        sudo ip link set $INTERFACE2 down
-        
-        # Remove the bridge
-        sudo ip link delete $BRIDGE
-        echo "Bridge $BRIDGE removed."
-    else
-        echo "$BRIDGE does not exist, nothing to do."
+# Function to disable sharing and stop monitoring
+disable_monitoring() {
+    echo "Disabling internet sharing and stopping PlunderBug monitoring..."
+
+    # Stop IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=0
+
+    # Clear iptables rules
+    sudo iptables -t nat -D POSTROUTING -o $MONITOR_INTERFACE -j MASQUERADE
+    sudo iptables -D FORWARD -i $PLUNDERBUG_INTERFACE -o $MONITOR_INTERFACE -j ACCEPT
+    sudo iptables -D FORWARD -i $MONITOR_INTERFACE -o $PLUNDERBUG_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    # Stop tcpdump
+    if [ ! -z "$TCPDUMP_PID" ]; then
+        sudo kill $TCPDUMP_PID
+        echo "tcpdump stopped."
     fi
 }
 
 # Main script logic
 if [ "$1" == "enable" ]; then
-    enable_bridge
+    enable_monitoring
 elif [ "$1" == "disable" ]; then
-    disable_bridge
+    disable_monitoring
 else
     echo "Usage: $0 {enable|disable}"
     exit 1
